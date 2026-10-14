@@ -1,0 +1,28 @@
+#cloud-config
+# Rendered by Terraform: ${db_host} and ${bucket} do not exist until the
+# database and the bucket do, which is what orders the whole build.
+package_update: true
+packages:
+  - python3-venv
+  - python3-pip
+  - git
+
+write_files:
+  - path: /etc/lnu-notes.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      DB_HOST=${db_host}
+      DB_USER=lnu
+      DB_PASS=${db_pass}
+      DB_NAME=lnunotes
+      S3_BUCKET=${bucket}
+      AWS_REGION=${region}
+
+runcmd:
+  - git clone ${repo} /opt/lnu-notes
+  - python3 -m venv /opt/lnu-notes/.venv
+  - /opt/lnu-notes/.venv/bin/pip install -r /opt/lnu-notes/requirements.txt
+  - install -m 644 /opt/lnu-notes/deploy/lnu-notes.service /etc/systemd/system/
+  - systemctl daemon-reload
+  - systemctl enable --now lnu-notes
