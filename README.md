@@ -48,10 +48,15 @@ diagnosing on AWS, so it is worth seeing now.
 code runs here and on EC2 with no edit.
 
 ```bash
-cp .env.example .env          # set DB_HOST=127.0.0.1, DB_PASS=lnu
+cp .env.example .env          # the defaults already match the container above
 set -a; . ./.env; set +a      # export everything in the file
 python app.py                 # http://localhost:8000
 ```
+
+The four database values in `.env.example` line up with the four `-e` flags in the
+`docker run` command — same user, same password, same database name. If you change
+one, change both. Note that `DB_PASS` is `MARIADB_PASSWORD`, not
+`MARIADB_ROOT_PASSWORD`; the application does not connect as root.
 
 **Read the health endpoint.** This is your debugging tool for the whole
 assignment:
@@ -61,10 +66,18 @@ curl -s http://localhost:8000/healthz | python3 -m json.tool
 ```
 
 ```json
-{ "app": "ok", "database": "ok", "s3": "FAIL: ... NoSuchBucket ..." }
+{ "app": "ok", "database": "ok", "s3": "FAIL: ParamValidationError ..." }
 ```
 
-Image upload fails locally because there is no bucket yet. Everything else works.
+`database: ok` is what you are checking for. The `s3` line fails because
+`S3_BUCKET` is empty — there is no bucket yet, and that is correct at this stage.
+
+| If `database` says | What is wrong |
+|---|---|
+| `timed out` | `DB_HOST` is not reachable — on your laptop it must be `127.0.0.1`, not an EC2 private address |
+| `Access denied for user 'lnu'` | `DB_PASS` does not match `MARIADB_PASSWORD`. Using `MARIADB_ROOT_PASSWORD` here is the usual mistake |
+| `Unknown database '...'` | `DB_NAME` does not match `MARIADB_DATABASE` |
+| `Connection refused` | the container is not running: `docker ps`, then `docker logs mysql` |
 
 ---
 
@@ -230,10 +243,12 @@ curl -s http://<web-public-ip>/healthz | python3 -m json.tool
 
 | It says | What is actually wrong |
 |---|---|
-| `database: FAIL … timed out` | the 3306 rule on the database group does not name the web group as its source, or `DB_HOST` is the public address |
+| `database: FAIL … timed out` | **packets are being dropped.** The 3306 rule on the database group does not name the web group as its source, `DB_HOST` points at nothing, or the two instances are in different VPCs |
+| `database: FAIL … Connection refused` | the packets *arrive* — so the security group is right and MySQL is not listening. Check `systemctl status mariadb` and `cloud-init status` on the database instance |
 | `database: FAIL … Access denied` | the password in `/etc/lnu-notes.env` differs from the one the database was created with |
-| `s3: FAIL … AccessDenied` | no instance profile attached, or the policy names a different bucket |
-| `s3: FAIL … NoSuchBucket` | typo, or the bucket is in another region |
+| `s3: FAIL … NoCredentialsError` | **no role at all.** boto3 found nothing to sign with — the instance profile is not attached, or it was attached after the service started |
+| `s3: FAIL … AccessDenied` | a role **is** attached, but its policy does not allow this action on this bucket |
+| `s3: FAIL … NoSuchBucket` | typo in `S3_BUCKET`, the placeholder was never replaced, or the bucket is in another region |
 
 ---
 
