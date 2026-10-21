@@ -1,20 +1,31 @@
+cat > ~/lnu-notes/.gitignore <<'EOF'
+# Python
 .venv/
 __pycache__/
 *.pyc
-.env
 
-# Terraform. The state file records everything it created — including every
-# value it handled, in clear text. It is not source code and never goes here.
-terraform/.terraform/
-terraform/.terraform.lock.hcl
-terraform/terraform.tfstate
-terraform/terraform.tfstate.*
-terraform/terraform.tfvars
+# Local settings and keys: never commit
+.env
 *.pem
-*.tfvars
-*.tfstate
-*.tfstate.backup
+
+# Terraform. State and plans hold every value Terraform handled,
+# including the database password, in clear text.
 .terraform/
 .terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+crash.log
+
+# Rendered from a template, so they hold real values
 *.rendered
-*.pem
+policy.json
+trust.json
+*.local.yaml
+*.local.sh
+
+# Downloads and system files
+*.pkg
+.DS_Store
+EOF
