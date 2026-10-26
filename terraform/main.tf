@@ -14,7 +14,8 @@
 terraform {
   required_version = ">= 1.6"
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+    aws    = { source = "hashicorp/aws", version = "~> 5.0" }
+    random = { source = "hashicorp/random", version = "~> 3.6" }
   }
 }
 
@@ -23,6 +24,17 @@ provider "aws" {
 }
 
 data "aws_caller_identity" "me" {}
+
+# The database password, generated rather than typed. Its result is stored in
+# terraform.tfstate in clear text — open the file and look. That is task 16.
+resource "random_password" "db" {
+  length  = 20
+  special = false # letters and digits only: safe in SQL, YAML and env files
+}
+
+data "aws_availability_zones" "here" {
+  state = "available"
+}
 
 # The current Ubuntu image, looked up rather than pasted. Image identifiers
 # differ per region and change with every release.
@@ -40,8 +52,18 @@ resource "aws_vpc" "main" {
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
+  availability_zone       = data.aws_availability_zones.here.names[0]
   map_public_ip_on_launch = true
   tags                    = { Name = "${var.project}-public" }
+}
+
+# The database lives here. No route to the internet gateway, so nothing on the
+# internet can reach it — and it has no public address to reach.
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = data.aws_availability_zones.here.names[0]
+  tags              = { Name = "${var.project}-private" }
 }
 
 resource "aws_internet_gateway" "gw" {
@@ -63,6 +85,39 @@ resource "aws_route_table" "public" {
 resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
+}
+
+# An internet gateway only serves instances that have a public address. The
+# database deliberately has none, so without this it cannot download MariaDB
+# at first boot. A NAT gateway lets the private subnet start connections out
+# (apt, updates) while still refusing every connection that starts outside.
+#
+# Cost: about $0.045 an hour plus its address, billed while it exists.
+# terraform destroy removes it. Do not leave it running between sessions.
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags   = { Name = "${var.project}-nat" }
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public.id # the NAT itself must sit in the public subnet
+  tags          = { Name = var.project }
+  depends_on    = [aws_internet_gateway.gw]
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat.id
+  }
+  tags = { Name = "${var.project}-private" }
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
 }
 
 # --------------------------------------------------------- security groups
@@ -190,6 +245,28 @@ resource "aws_iam_role_policy" "web_s3" {
   })
 }
 
+# "The web instance may read and write the bucket; your laptop may not."
+# An IAM policy can only GRANT. You are an administrator, so to keep even you
+# out, the bucket itself must DENY everyone except the web role. Deny beats
+# every allow — including AdministratorAccess. Bucket settings and deletion are
+# not covered, so Terraform can still manage and destroy it.
+resource "aws_s3_bucket_policy" "notes" {
+  bucket = aws_s3_bucket.notes.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "OnlyTheWebRoleReadsAndWritesObjects"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = ["s3:GetObject", "s3:PutObject"]
+      Resource  = "${aws_s3_bucket.notes.arn}/*"
+      Condition = { ArnNotEquals = { "aws:PrincipalArn" = aws_iam_role.web.arn } }
+    }]
+  })
+  # Block Public Access must be in place first, or it may reject the policy call.
+  depends_on = [aws_s3_bucket_public_access_block.notes]
+}
+
 resource "aws_iam_instance_profile" "web" {
   name = "${var.project}-web"
   role = aws_iam_role.web.name
@@ -199,14 +276,29 @@ resource "aws_iam_instance_profile" "web" {
 resource "aws_instance" "db" {
   ami                         = data.aws_ssm_parameter.ubuntu.value
   instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.public.id
+  subnet_id                   = aws_subnet.private.id
   vpc_security_group_ids      = [aws_security_group.db.id]
   associate_public_ip_address = false # no address on the internet at all
   key_name                    = var.key_name
 
+  # cloud-init only runs on first boot. Without this, changing the user data
+  # updates the instance in place and the new script never executes — task 16
+  # would look finished while nothing actually read from SSM.
+  user_data_replace_on_change = true
   user_data = templatefile("${path.module}/cloud-config-db.yaml.tftpl", {
-    db_pass = var.db_password
+    db_pass = random_password.db.result
   })
+
+  # Nothing in this block refers to the NAT route, so Terraform would happily
+  # boot the instance before the route exists — and apt would fail. This makes
+  # the ordering explicit.
+  depends_on = [aws_route_table_association.private]
+
+  # A new Ubuntu image every week or two would otherwise make every later plan
+  # offer to replace both instances, which hides the change you actually made.
+  lifecycle {
+    ignore_changes = [ami]
+  }
 
   tags = { Name = "${var.project}-db" }
 }
@@ -222,13 +314,18 @@ resource "aws_instance" "web" {
 
   # Referring to aws_instance.db.private_ip is what orders the two: the
   # database must exist before this file can be rendered.
+  user_data_replace_on_change = true
   user_data = templatefile("${path.module}/cloud-config-web.yaml.tftpl", {
     db_host = aws_instance.db.private_ip
-    db_pass = var.db_password
+    db_pass = random_password.db.result
     bucket  = aws_s3_bucket.notes.id
     region  = var.region
     repo    = var.repo_url
   })
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
 
   tags = { Name = "${var.project}-web" }
 }

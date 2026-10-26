@@ -17,23 +17,27 @@ variable "instance_type" {
 }
 
 variable "key_name" {
-  description = "An existing EC2 key pair name, for SSH to the web instance."
+  description = "Name of an EC2 key pair that already exists in this region, for SSH to the web instance."
   type        = string
+  default     = "2dv705"
 }
 
 variable "admin_cidr" {
-  description = "Your own address, as a /32. Find it with: curl https://checkip.amazonaws.com"
+  description = "Your own public address WITH /32 on the end, e.g. 203.0.113.25/32. Find it with: curl -s https://checkip.amazonaws.com"
   type        = string
+
+  validation {
+    condition     = can(cidrhost(var.admin_cidr, 0)) && strcontains(var.admin_cidr, "/")
+    error_message = "admin_cidr must be an address with /32 on the end, e.g. 203.0.113.25/32 — not the bare address."
+  }
 }
 
 variable "repo_url" {
-  description = "Where the instance clones the application from."
+  description = "Public Git URL the web instance clones the application from, e.g. https://github.com/NAME/lnu-notes.git"
   type        = string
-  default     = "https://github.com/CHANGE-ME/lnu-notes.git"
-}
 
-variable "db_password" {
-  description = "Database password. It is written into the state file in clear text — see README."
-  type        = string
-  sensitive   = true
+  validation {
+    condition     = startswith(var.repo_url, "https://") && !strcontains(var.repo_url, "CHANGE-ME") && !strcontains(var.repo_url, "YOUR-NAME")
+    error_message = "repo_url must be the real https:// address of a PUBLIC repository — the instance clones it at boot and has no credentials."
+  }
 }
