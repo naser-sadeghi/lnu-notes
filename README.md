@@ -140,7 +140,7 @@ build it.
 
 ```bash
 cd terraform
-cp terraform.tfvars.example terraform.tfvars    # fill in four values
+cp terraform.tfvars.example terraform.tfvars    # fill in two values
 terraform init                                  # download the AWS provider
 terraform plan                                  # what WOULD change — nothing happens yet
 terraform apply                                 # make reality match the file
@@ -164,7 +164,7 @@ curl -s "$(terraform output -raw health_url)" | python3 -m json.tool
 | `cloud-config-*.yaml.tftpl` | the user data, as templates Terraform fills in |
 | `README-changes.md` | where each of the later tasks lands in this directory |
 
-The line worth finding is in `sg-db`:
+The line worth finding is in the database security group:
 
 ```hcl
 security_groups = [aws_security_group.web.id]
@@ -215,6 +215,18 @@ will read the shell ones.
 | `iam-policy-s3.json` | least-privilege policy for the web instance's role |
 | `iam-policy-ssm.json` | for the task that takes the password out of the state file |
 
+**The placeholders stay placeholders.** `CHANGE-ME` in these files is deliberate:
+they are templates committed to git, and the copy with your real password in it is
+not. Render a filled copy at deploy time rather than editing the tracked file —
+
+```bash
+sed "s/CHANGE-ME/$DBPASS/" deploy/cloud-config-db.yaml > deploy/db.local.yaml
+aws ec2 run-instances ... --user-data file://deploy/db.local.yaml
+```
+
+`*.local.yaml`, `*.local.sh`, `policy.json` and `trust.json` are all git-ignored for
+this reason. If you did edit a template in place, check `git diff` before you commit.
+
 Both forms are here on purpose. One says *what the machine should look like*,
 the other says *how to get there*. Run either twice and only the declarative one
 is safe — which is what idempotent means.
@@ -258,11 +270,11 @@ Find them, and discuss them in your report:
 
 1. **The database password reaches the instance through user data**, which any
    process on that instance can read back from the metadata service.
-2. **With Terraform, that password is also written into `terraform.tfstate` in
-   clear text.** This is the one the assignment asks you to fix — see
-   `terraform/README-changes.md` — and it is why the state file is git-ignored,
-   and why on a team it belongs in access-controlled remote storage rather than
-   next to the code.
+2. **With Terraform, the generated database password is stored in
+   `terraform.tfstate` in clear text** — `grep '"result"' terraform.tfstate` shows
+   it. This is the one the assignment asks you to fix (task 16, see
+   `terraform/README-changes.md`), and it is why the state file is git-ignored.
+   On a team, state belongs in access-controlled remote storage, never beside the code.
 3. **The web instance's role allows `s3:DeleteObject`.** The application never
    deletes anything. Narrowing a policy to what the code actually calls is the
    work that least privilege really is.
